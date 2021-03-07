@@ -1,2 +1,1 @@
-# virusmodoki
-projectname is virusmodoki 
+
