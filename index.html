@@ -80,7 +80,7 @@ async function start() {
   const name = document.getElementById("name").value.trim();
   if (!server || !name) return alert("サーバーIPと名前を入力してください");
 
-  ws = new WebSocket("wss://" + server);
+  ws = new WebSocket("ws://" + server);
   ws.onopen = () => {
     ws.send(JSON.stringify({type:"register", name}));
     updateUI({status:"待機中"});
