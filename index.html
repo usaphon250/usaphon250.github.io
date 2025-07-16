@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Proximity Voice Chat</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+  <style>
+    #log { height: 200px; overflow-y: auto; background: #f5f5f5; padding: 10px; font-family: monospace; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+<section class="section">
+  <div class="container">
+    <h1 class="title">🎮 Minecraft Voice Chat</h1>
+
+    <div class="box">
+      <div class="field">
+        <label class="label">サーバー (IP:ポート)</label>
+        <div class="control">
+          <input class="input" id="server" placeholder="例：localhost:8765" value="localhost:8765">
+        </div>
+      </div>
+      <div class="field">
+        <label class="label">プレイヤー名</label>
+        <div class="control">
+          <input class="input" id="name" placeholder="Minecraftユーザー名">
+        </div>
+      </div>
+      <div class="buttons">
+        <button class="button is-primary" onclick="start()">接続</button>
+        <button class="button is-warning" id="muteBtn" onclick="toggleMute()" disabled>🔇 ミュート</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <p><strong id="status">状態: 未接続</strong></p>
+      <p><strong id="target">接続先: -</strong></p>
+      <p><strong id="distance">距離: -</strong></p>
+      <p><strong id="players">接続中プレイヤー: -</strong></p>
+    </div>
+
+    <div class="box">
+      <h2 class="subtitle">📜 ログ</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</section>
+
+<audio id="remoteAudio" autoplay></audio>
+
+<script>
+let ws, pc, localStream;
+let isMuted = false;
+let connectedPeer = null;
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  const el = document.getElementById("log");
+  el.textContent += `[${t}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateUI({status, target, distance, players}) {
+  if (status) document.getElementById("status").textContent = "状態: " + status;
+  if (target !== undefined) document.getElementById("target").textContent = "接続先: " + (target || "-");
+  if (distance !== undefined) document.getElementById("distance").textContent = "距離: " + (distance !== null ? distance.toFixed(2) + " ブロック" : "-");
+  if (players) document.getElementById("players").textContent = "接続中プレイヤー: " + players.join(", ");
+}
+
+function toggleMute() {
+  if (!localStream) return;
+  isMuted = !isMuted;
+  localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
+  document.getElementById("muteBtn").classList.toggle("is-danger", isMuted);
+  log(isMuted ? "🔇 ミュート ON" : "🔊 ミュート OFF");
+}
+
+async function start() {
+  const server = document.getElementById("server").value.trim();
+  const name = document.getElementById("name").value.trim();
+  if (!server || !name) return alert("サーバーIPと名前を入力してください");
+
+  ws = new WebSocket("ws://" + server);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({type:"register", name}));
+    updateUI({status:"待機中"});
+    log("✅ WebSocket接続成功");
+  };
+
+  ws.onmessage = async evt => {
+    const m = JSON.parse(evt.data);
+    log("受信: " + JSON.stringify(m));
+
+    if (m.type === "playerList") {
+      updateUI({players: m.players});
+    }
+    if (m.type === "match") {
+      connectedPeer = m.target;
+      updateUI({status:"通話中", target:m.target, distance:m.distance});
+      await setupPeer(true);
+    }
+    if (m.type === "offer") {
+      connectedPeer = m.source;
+      updateUI({status:"通話中", target:connectedPeer, distance:m.distance});
+      await setupPeer(false);
+      await pc.setRemoteDescription(m.offer);
+      const ans = await pc.createAnswer();
+      await pc.setLocalDescription(ans);
+      ws.send(JSON.stringify({type:"answer", answer:ans}));
+    }
+    if (m.type === "answer") {
+      await pc.setRemoteDescription(m.answer);
+    }
+    if (m.type === "ice") {
+      if (m.candidate) await pc.addIceCandidate(m.candidate);
+    }
+    if (m.type === "disconnect") {
+      log("🔌 通話解除（距離超過）");
+      updateUI({status:"待機中", target:null, distance:null});
+      if (pc) pc.close();
+      pc = null;
+      connectedPeer = null;
+      document.getElementById("muteBtn").disabled = true;
+    }
+  };
+
+  ws.onclose = () => {
+    updateUI({status:"切断"});
+    log("🔌 WebSocket切断");
+  };
+  ws.onerror = e => log("❌ WebSocketエラー:" + e.message);
+}
+
+async function setupPeer(isCaller) {
+  if (pc) return;
+  pc = new RTCPeerConnection();
+
+  pc.onicecandidate = e => {
+    if (e.candidate) ws.send(JSON.stringify({type:"ice", candidate:e.candidate}));
+  };
+
+  pc.ontrack = e => {
+    document.getElementById("remoteAudio").srcObject = e.streams[0];
+    document.getElementById("muteBtn").disabled = false;
+  };
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    log("🎤 マイクストリーム取得");
+  } catch (err) {
+    return log("❌ マイク取得エラー:" + err);
+  }
+
+  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+  if (isCaller) {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({type:"offer", offer}));
+  }
+}
+</script>
+</body>
+</html>
