@@ -1,174 +1,207 @@
 <!DOCTYPE html>
-<html lang="ja">
-
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>Proximity Voice Chat</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <title>Secure WebRTC</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss://your-domain.com:8765;">
     <style>
-        #log {
-            height: 200px;
-            overflow-y: auto;
-            background: #f5f5f5;
-            padding: 10px;
-            font-family: monospace;
-            font-size: 0.9em;
-        }
+        body { font-family: sans-serif; }
+        video { border: 1px solid black; width: 480px; height: 360px; background: #222; }
+        .container { display: flex; gap: 20px; }
+        .video-box { display: flex; flex-direction: column; gap: 10px; }
+        #status { font-weight: bold; }
     </style>
 </head>
-
 <body>
-    <section class="section">
-        <div class="container">
-            <h1 class="title">🎮 Minecraft Voice Chat</h1>
 
-            <div class="box">
-                <div class="field">
-                    <label class="label">サーバー (IP:ポート)</label>
-                    <div class="control">
-                        <input class="input" id="server" placeholder="例：localhost:8765" value="localhost:8765">
-                    </div>
-                </div>
-                <div class="field">
-                    <label class="label">プレイヤー名</label>
-                    <div class="control">
-                        <input class="input" id="name" placeholder="Minecraftユーザー名">
-                    </div>
-                </div>
-                <div class="buttons">
-                    <button class="button is-primary" onclick="start()">接続</button>
-                    <button class="button is-warning" id="muteBtn" onclick="toggleMute()" disabled>🔇 ミュート</button>
-                </div>
-            </div>
+    <h1>WebRTC + Python WebSocket サーバー</h1>
+    <p>ステータス: <span id="status">未接続</span></p>
 
-            <div class="box">
-                <p><strong id="status">状態: 未接続</strong></p>
-                <p><strong id="target">接続先: -</strong></p>
-                <p><strong id="distance">距離: -</strong></p>
-                <p><strong id="players">接続中プレイヤー: -</strong></p>
-            </div>
-
-            <div class="box">
-                <h2 class="subtitle">📜 ログ</h2>
-                <div id="log"></div>
-            </div>
+    <div class="container">
+        <div class="video-box">
+            <h2>自分の映像</h2>
+            <video id="localVideo" autoplay playsinline muted></video>
         </div>
-    </section>
+        <div class="video-box">
+            <h2>相手の映像</h2>
+            <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+    </div>
 
-    <audio id="remoteAudio" autoplay></audio>
+    <hr>
+
+    <div class="control-box">
+        <button id="startButton">1. カメラを開始</button>
+        <button id="callButton" disabled>2. 通話を開始</button>
+        <button id="hangupButton" disabled>通話を終了</button>
+    </div>
 
     <script>
-        let ws, pc, localStream;
-        let isMuted = false;
-        let connectedPeer = null;
+        class SecureWebRTCClient {
+            constructor() {
+                this.localStream = null;
+                this.peerConnection = null;
+                this.ws = null;
+                this.token = null;
+                this.roomId = null;
+                this.userId = null;
+                
+                // セキュアな設定
+                this.peerConfig = {
+                    iceServers: [
+                        {
+                            urls: 'turn:your-turn-server.com:3478',
+                            username: 'username',
+                            credential: 'password'
+                        }
+                    ],
+                    iceTransportPolicy: 'relay', // TURNサーバーを強制使用
+                };
+            }
 
-        function log(msg) {
-            const t = new Date().toLocaleTimeString();
-            const el = document.getElementById("log");
-            el.textContent += `[${t}] ${msg}\n`;
-            el.scrollTop = el.scrollHeight;
+            async connect(token, roomId, userId) {
+                this.token = token;
+                this.roomId = roomId;
+                this.userId = userId;
+
+                // セキュアなWebSocket接続
+                this.ws = new WebSocket('wss://221.118.128.239:8000');
+                
+                this.ws.onopen = async () => {
+                    // 認証情報の送信
+                    await this.authenticate();
+                };
+
+                this.setupWebSocketHandlers();
+            }
+
+            async authenticate() {
+                const authMessage = {
+                    type: 'auth',
+                    token: this.token,
+                    room_id: this.roomId,
+                    user_id: this.userId
+                };
+                this.ws.send(JSON.stringify(authMessage));
+            }
+
+            async startCall() {
+                try {
+                    // メディアストリームの取得時に制約を設定
+                    const constraints = {
+                        video: {
+                            width: { max: 1280 },
+                            height: { max: 720 },
+                            frameRate: { max: 30 }
+                        },
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        }
+                    };
+                    
+                    this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                    
+                    // セキュアなPeerConnection作成
+                    await this.createSecurePeerConnection();
+                    
+                } catch (e) {
+                    console.error('Error starting call:', e);
+                    throw e;
+                }
+            }
+
+            async createSecurePeerConnection() {
+                this.peerConnection = new RTCPeerConnection(this.peerConfig);
+                
+                // セキュリティ設定の検証
+                if (!this.validatePeerConnection()) {
+                    throw new Error('Insecure PeerConnection configuration');
+                }
+
+                // 各種イベントハンドラの設定
+                this.setupPeerConnectionHandlers();
+                
+                // ローカルストリームの追加
+                this.localStream.getTracks().forEach(track => {
+                    this.peerConnection.addTrack(track, this.localStream);
+                });
+            }
+
+            validatePeerConnection() {
+                // PeerConnectionの設定を検証
+                return (
+                    this.peerConnection.configuration.iceTransportPolicy === 'relay' &&
+                    this.peerConnection.configuration.iceServers &&
+                    this.peerConnection.configuration.iceServers.length > 0
+                );
+            }
+
+            setupPeerConnectionHandlers() {
+                this.peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        this.sendSignalingMessage({
+                            type: 'ice-candidate',
+                            candidate: event.candidate,
+                            sender: this.userId,
+                            room_id: this.roomId
+                        });
+                    }
+                };
+
+                // 通信の暗号化状態を監視
+                this.peerConnection.onconnectionstatechange = () => {
+                    if (this.peerConnection.connectionState === 'connected') {
+                        // DTLS-SRTPの暗号化を確認
+                        const senders = this.peerConnection.getSenders();
+                        senders.forEach(sender => {
+                            if (sender.transport) {
+                                console.log('DTLS state:', sender.transport.state);
+                            }
+                        });
+                    }
+                };
+            }
+
+            sendSignalingMessage(message) {
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify(message));
+                }
+            }
+
+            cleanup() {
+                if (this.peerConnection) {
+                    this.peerConnection.close();
+                }
+                if (this.ws) {
+                    this.ws.close();
+                }
+                if (this.localStream) {
+                    this.localStream.getTracks().forEach(track => track.stop());
+                }
+            }
         }
 
-        function updateUI({ status, target, distance, players }) {
-            if (status) document.getElementById("status").textContent = "状態: " + status;
-            if (target !== undefined) document.getElementById("target").textContent = "接続先: " + (target || "-");
-            if (distance !== undefined) document.getElementById("distance").textContent = "距離: " + (distance !== null ? distance.toFixed(2) + " ブロック" : "-");
-            if (players) document.getElementById("players").textContent = "接続中プレイヤー: " + players.join(", ");
-        }
-
-        function toggleMute() {
-            if (!localStream) return;
-            isMuted = !isMuted;
-            localStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
-            document.getElementById("muteBtn").classList.toggle("is-danger", isMuted);
-            log(isMuted ? "🔇 ミュート ON" : "🔊 ミュート OFF");
-        }
-
-        async function start() {
-            const server = document.getElementById("server").value.trim();
-            const name = document.getElementById("name").value.trim();
-            if (!server || !name) return alert("サーバーIPと名前を入力してください");
-
-            ws = new WebSocket("wss://" + server);
-            ws.onopen = () => {
-                ws.send(JSON.stringify({ type: "register", name }));
-                updateUI({ status: "待機中" });
-                log("✅ WebSocket接続成功");
-            };
-
-            ws.onmessage = async evt => {
-                const m = JSON.parse(evt.data);
-                log("受信: " + JSON.stringify(m));
-
-                if (m.type === "playerList") {
-                    updateUI({ players: m.players });
-                }
-                if (m.type === "match") {
-                    connectedPeer = m.target;
-                    updateUI({ status: "通話中", target: m.target, distance: m.distance });
-                    await setupPeer(true);
-                }
-                if (m.type === "offer") {
-                    connectedPeer = m.source;
-                    updateUI({ status: "通話中", target: connectedPeer, distance: m.distance });
-                    await setupPeer(false);
-                    await pc.setRemoteDescription(m.offer);
-                    const ans = await pc.createAnswer();
-                    await pc.setLocalDescription(ans);
-                    ws.send(JSON.stringify({ type: "answer", answer: ans }));
-                }
-                if (m.type === "answer") {
-                    await pc.setRemoteDescription(m.answer);
-                }
-                if (m.type === "ice") {
-                    if (m.candidate) await pc.addIceCandidate(m.candidate);
-                }
-                if (m.type === "disconnect") {
-                    log("🔌 通話解除（距離超過）");
-                    updateUI({ status: "待機中", target: null, distance: null });
-                    if (pc) pc.close();
-                    pc = null;
-                    connectedPeer = null;
-                    document.getElementById("muteBtn").disabled = true;
-                }
-            };
-
-            ws.onclose = () => {
-                updateUI({ status: "切断" });
-                log("🔌 WebSocket切断");
-            };
-            ws.onerror = e => log("❌ WebSocketエラー:" + e.message);
-        }
-
-        async function setupPeer(isCaller) {
-            if (pc) return;
-            pc = new RTCPeerConnection();
-
-            pc.onicecandidate = e => {
-                if (e.candidate) ws.send(JSON.stringify({ type: "ice", candidate: e.candidate }));
-            };
-
-            pc.ontrack = e => {
-                document.getElementById("remoteAudio").srcObject = e.streams[0];
-                document.getElementById("muteBtn").disabled = false;
-            };
-
+        // 使用例
+        const client = new SecureWebRTCClient();
+        
+        // ログイン後に接続を開始
+        async function startSecureConnection() {
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                log("🎤 マイクストリーム取得");
-            } catch (err) {
-                return log("❌ マイク取得エラー:" + err);
-            }
-
-            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-            if (isCaller) {
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                ws.send(JSON.stringify({ type: "offer", offer }));
+                await client.connect(
+                    'your-secure-token',
+                    'room-123',
+                    'user-456'
+                );
+                await client.startCall();
+            } catch (e) {
+                console.error('Connection failed:', e);
             }
         }
+
+        // クリーンアップ
+        window.onbeforeunload = () => {
+            client.cleanup();
+        };
     </script>
 </body>
-
 </html>
